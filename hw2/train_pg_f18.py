@@ -80,6 +80,8 @@ class Agent(object):
         self.min_timesteps_per_batch = sample_trajectory_args['min_timesteps_per_batch']
 
         self.gamma = estimate_return_args['gamma']
+        self.gae = estimate_return_args['gae']
+        self.gae_lambda = estimate_return_args['gae_lambda']
         self.reward_to_go = estimate_return_args['reward_to_go']
         self.nn_baseline = estimate_return_args['nn_baseline']
         self.normalize_advantages = estimate_return_args['normalize_advantages']
@@ -330,6 +332,37 @@ class Agent(object):
                 "action": np.array(acs, dtype=np.float32)}
         return path
 
+    def sample(self, paths, env):
+        print('sample')
+        path = self.sample_trajectory(env, False)
+        paths.append(path)
+
+    def parallel_sample_trajectories(self, env_name, env):
+        timesteps_this_batch = 0
+        timesteps_to_go = self.min_timesteps_per_batch
+        paths = []
+
+        while True:
+            processes = []
+            num_parallel = int(np.ceil(timesteps_to_go / self.max_path_length))
+            print('num_parallel=', num_parallel)
+            for i in range(num_parallel):
+                p = Process(target=self.sample, args=(paths, env))
+                p.start()
+                processes.append(p)
+            for p in processes:
+                print('join')
+                p.join()
+            timesteps = sum([pathlength(p) for p in paths])
+            print('timesteps=', timesteps)
+            timesteps_this_batch += timesteps
+            if timesteps_this_batch > self.min_timesteps_per_batch:
+                break
+            else:
+                timesteps_to_go -= timesteps
+        return paths, timesteps_this_batch
+
+
     # ====================================================================================#
     #                           ----------PROBLEM 3----------
     # ====================================================================================#
@@ -431,7 +464,7 @@ class Agent(object):
                 q_n.extend([q] * len(re))
         return q_n
 
-    def compute_advantage(self, ob_no, q_n):
+    def compute_advantage(self, ob_no, q_n, re_n):
         """
             Computes advantages by (possibly) subtracting a baseline from the estimated Q values
 
@@ -462,10 +495,35 @@ class Agent(object):
             # #bl2 in Agent.update_parameters.
             b_n = self.sess.run(self.baseline_prediction, feed_dict={self.sy_ob_no: ob_no})  # YOUR CODE HERE
             b_n = (b_n - np.mean(q_n)) / np.std(q_n)
-            adv_n = q_n - b_n
+
+            # Bonus part for GAE-lambda
+            if self.gae:
+                print('gae_lambda = ', self.gae_lambda)
+                adv_n = []
+                # A_t = delta_t + gamma * lambda * A_{t+1}
+                # A_T = delta_T = -V(s_T) + r_T + 0
+                # delta_t = -V(s_t) + r_t + gamma * V(s_{t+1})
+                index_b = 0
+                for re in re_n:
+                    adv_along_path = []
+                    last_v = 0  # V(s_{t+1})
+                    a_t = 0
+                    # we need to iterate the part of b_n corresponding to re in reversed order
+                    for r, v in zip(reversed(re), reversed(b_n[index_b: index_b + len(re)])):
+                        delta_t = -v + r + self.gamma * last_v
+                        a_t = delta_t + self.gamma * self.gae_lambda * a_t
+                        last_v = v
+                        adv_along_path.append(a_t)
+                    index_b += len(re)
+                    adv_along_path.reverse()
+                    adv_n.extend(adv_along_path)
+                # update q_n for fitting baseline later
+                q_n = b_n + adv_n
+            else:
+                adv_n = q_n - b_n
         else:
             adv_n = q_n.copy()
-        return adv_n
+        return adv_n, q_n
 
     def estimate_return(self, ob_no, re_n):
         """
@@ -487,7 +545,7 @@ class Agent(object):
                     advantages whose length is the sum of the lengths of the paths
         """
         q_n = self.sum_of_rewards(re_n)
-        adv_n = self.compute_advantage(ob_no, q_n)
+        adv_n, q_n = self.compute_advantage(ob_no, q_n, re_n)
         # ====================================================================================#
         #                           ----------PROBLEM 3----------
         # Advantage Normalization
@@ -569,7 +627,9 @@ def train_PG(
         nn_baseline,
         seed,
         n_layers,
-        size):
+        size,
+        gae,
+        gae_lambda):
     start = time.time()
 
     # ========================================================================================#
@@ -622,6 +682,8 @@ def train_PG(
         'reward_to_go': reward_to_go,
         'nn_baseline': nn_baseline,
         'normalize_advantages': normalize_advantages,
+        'gae': gae,
+        'gae_lambda': gae_lambda,
     }
 
     agent = Agent(computation_graph_args, sample_trajectory_args, estimate_return_args)
@@ -640,6 +702,8 @@ def train_PG(
     for itr in range(n_iter):
         print("********** Iteration %i ************" % itr)
         paths, timesteps_this_batch = agent.sample_trajectories(itr, env)
+        # parallel sample trajectories
+        # paths, timesteps_this_batch = agent.parallel_sample_trajectories(env_name, env)
         total_timesteps += timesteps_this_batch
 
         # Build arrays for observation, action for the policy gradient update by concatenating 
@@ -686,6 +750,9 @@ def main():
     parser.add_argument('--n_experiments', '-e', type=int, default=1)
     parser.add_argument('--n_layers', '-l', type=int, default=2)
     parser.add_argument('--size', '-s', type=int, default=64)
+    parser.add_argument('--parallel_sample', '-ps', action='store_true')
+    parser.add_argument('--gae', '-gae', action='store_true')
+    parser.add_argument('--gae_lambda', type=float, default=1.0)
     args = parser.parse_args()
 
     if not (os.path.exists('data')):
@@ -719,7 +786,9 @@ def main():
                 nn_baseline=args.nn_baseline,
                 seed=seed,
                 n_layers=args.n_layers,
-                size=args.size
+                size=args.size,
+                gae=args.gae,
+                gae_lambda=args.gae_lambda
             )
 
         # # Awkward hacky process runs, because Tensorflow does not like
