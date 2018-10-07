@@ -90,6 +90,9 @@ class QLearner(object):
         assert type(env.observation_space) == gym.spaces.Box
         assert type(env.action_space) == gym.spaces.Discrete
 
+        # detailed log for plot
+        self.log = {'timestep':[], 'mean_reward': [], 'best_reward': []}
+
         self.target_update_freq = target_update_freq
         self.optimizer_spec = optimizer_spec
         self.batch_size = batch_size
@@ -159,7 +162,19 @@ class QLearner(object):
         ######
 
         # YOUR CODE HERE
+        q_act_t_ph = q_func(obs_t_float, num_actions=self.num_actions, scope='q_func', reuse=False)
+        self.max_act_ph = tf.argmax(q_act_t_ph, axis=1)
+        q_tp1_ph = q_func(obs_tp1_float, num_actions=self.num_actions, scope='target_q_func', reuse=False)
+        if double_q:
+            max_q_ph = tf.reduce_sum(q_tp1_ph * tf.one_hot(self.max_act_ph, self.num_actions), axis=1)
+        else:
+            max_q_ph = tf.reduce_max(q_tp1_ph, axis=1)
+        target_ph = self.rew_t_ph + (1.0 - self.done_mask_ph) * gamma * max_q_ph
+        q_t_ph = tf.reduce_sum(q_act_t_ph * tf.one_hot(self.act_t_ph, self.num_actions), axis=1)
+        self.total_error = tf.reduce_mean(huber_loss(q_t_ph - target_ph))
 
+        q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_func')
+        target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='target_q_func')
         ######
 
         # construct optimization op (with gradient clipping)
@@ -177,7 +192,6 @@ class QLearner(object):
 
         # construct the replay buffer
         self.replay_buffer = ReplayBuffer(replay_buffer_size, frame_history_len, lander=lander)
-        self.replay_buffer_idx = None
 
         ###############
         # RUN ENV     #
@@ -229,16 +243,29 @@ class QLearner(object):
         #####
 
         # YOUR CODE HERE
-        pass
+        replay_buffer_idx = self.replay_buffer.store_frame(self.last_obs)
+        if not self.model_initialized or random.random() < self.exploration.value(self.t):
+            # taking random action
+            action = self.env.action_space.sample()
+            # action = random.randint(0, self.num_actions - 1)
+        else:
+            encoded_obs = self.replay_buffer.encode_recent_observation()
+            # get max action
+            action = self.session.run(self.max_act_ph, {self.obs_t_ph: [encoded_obs]})[0]
+
+        self.last_obs, reward, done, info = self.env.step(action)
+        self.replay_buffer.store_effect(idx=replay_buffer_idx, action=action, reward=reward, done=done)
+        if done:
+            self.last_obs = self.env.reset()
 
     def update_model(self):
         ### 3. Perform experience replay and train the network.
         # note that this is only done if the replay buffer contains enough samples
         # for us to learn something useful -- until then, the model will not be
         # initialized and random actions should be taken
-        if (self.t > self.learning_starts and \
-                            self.t % self.learning_freq == 0 and \
-                    self.replay_buffer.can_sample(self.batch_size)):
+        if (self.t > self.learning_starts
+            and self.t % self.learning_freq == 0
+            and self.replay_buffer.can_sample(self.batch_size)):
             # Here, you should perform training. Training consists of four steps:
             # 3.a: use the replay buffer to sample a batch of transitions (see the
             # replay buffer code for function definition, each batch that you sample
@@ -275,6 +302,25 @@ class QLearner(object):
             #####
 
             # YOUR CODE HERE
+            obs_batch, act_batch, rew_batch, next_obs_batch, done_mask = self.replay_buffer.sample(self.batch_size)
+
+            if not self.model_initialized:
+                initialize_interdependent_variables(self.session, tf.global_variables(),
+                                                    {self.obs_t_ph: obs_batch,
+                                                     self.obs_tp1_ph: next_obs_batch})
+                self.model_initialized = True
+            # train model
+            self.session.run(self.train_fn,
+                             {self.obs_t_ph: obs_batch,
+                              self.act_t_ph: act_batch,
+                              self.rew_t_ph: rew_batch,
+                              self.obs_tp1_ph: next_obs_batch,
+                              self.done_mask_ph: done_mask,
+                              self.learning_rate: self.optimizer_spec.lr_schedule.value(self.t)})
+
+            # update model periodically
+            if self.num_param_updates % self.target_update_freq == 0:
+                self.session.run(self.update_target_fn)
 
             self.num_param_updates += 1
 
@@ -291,8 +337,11 @@ class QLearner(object):
 
         if self.t % self.log_every_n_steps == 0 and self.model_initialized:
             print("Timestep %d" % (self.t,))
+            self.log['timestep'].append(self.t)
             print("mean reward (100 episodes) %f" % self.mean_episode_reward)
+            self.log['mean_reward'].append(self.mean_episode_reward)
             print("best mean reward %f" % self.best_mean_episode_reward)
+            self.log['best_reward'].append(self.best_mean_episode_reward)
             print("episodes %d" % len(episode_rewards))
             print("exploration %f" % self.exploration.value(self.t))
             print("learning_rate %f" % self.optimizer_spec.lr_schedule.value(self.t))
@@ -304,7 +353,7 @@ class QLearner(object):
             sys.stdout.flush()
 
             with open(self.rew_file, 'wb') as f:
-                pickle.dump(episode_rewards, f, pickle.HIGHEST_PROTOCOL)
+                pickle.dump(self.log, f, pickle.HIGHEST_PROTOCOL)
 
 
 def learn(*args, **kwargs):
