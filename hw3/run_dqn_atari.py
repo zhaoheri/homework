@@ -5,6 +5,8 @@ import os.path as osp
 import random
 import numpy as np
 import tensorflow as tf
+import os, sys
+import time
 import tensorflow.contrib.layers as layers
 
 import dqn
@@ -31,11 +33,11 @@ def atari_model(img_in, num_actions, scope, reuse=False):
 
 def atari_learn(env,
                 session,
-                num_timesteps):
+                num_timesteps,
+                lr_multiplier):
     # This is just a rough estimate
     num_iterations = float(num_timesteps) / 4.0
 
-    lr_multiplier = 1.0
     lr_schedule = PiecewiseSchedule([
         (0, 1e-4 * lr_multiplier),
         (num_iterations / 10, 1e-4 * lr_multiplier),
@@ -61,6 +63,12 @@ def atari_learn(env,
         ], outside_value=0.01
     )
 
+    if not (os.path.exists('data')):
+        os.makedirs('data')
+    logdir = os.path.join('data', 'PongNoFrameskip-v4')
+    if not (os.path.exists(logdir)):
+        os.makedirs(logdir)
+
     dqn.learn(
         env=env,
         q_func=atari_model,
@@ -76,7 +84,9 @@ def atari_learn(env,
         frame_history_len=4,
         target_update_freq=10000,
         grad_norm_clipping=10,
-        double_q=True
+        double_q=False,
+        # rew_file='%s_lr_%s.pkl' % (os.path.join(logdir, time.strftime("%d-%m-%Y_%H-%M-%S")), str(lr_multiplier))
+        rew_file='%s_lr_%s.pkl' % (os.path.join(logdir, time.strftime("%d-%m-%Y_%H-%M-%S")), 'vanilla')
     )
     env.close()
 
@@ -115,7 +125,7 @@ def get_env(task, seed):
     env.seed(seed)
 
     expt_dir = '/tmp/hw3_vid_dir2/'
-    env = wrappers.Monitor(env, osp.join(expt_dir, "gym"), force=True)
+    env = wrappers.Monitor(env, osp.join(expt_dir, "gym"), force=True, video_callable=False)
     env = wrap_deepmind(env)
 
     return env
@@ -130,7 +140,11 @@ def main():
     print('random seed = %d' % seed)
     env = get_env(task, seed)
     session = get_session()
-    atari_learn(env, session, num_timesteps=2e8)
+    if len(sys.argv) >= 2:
+        lr_multiplier = float(sys.argv[1])
+    else:
+        lr_multiplier = 1.0
+    atari_learn(env, session, num_timesteps=2e8, lr_multiplier=lr_multiplier)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@ import os.path as osp
 import random
 import numpy as np
 import tensorflow as tf
+import os
+from datetime import datetime
 import tensorflow.contrib.layers as layers
 
 import dqn
@@ -56,7 +58,11 @@ def atari_learn(env,
             (num_iterations / 2, 0.01),
         ], outside_value=0.01
     )
-
+    if not (os.path.exists('data')):
+        os.makedirs('data')
+    logdir = os.path.join('data', 'Pong-ram-v0')
+    if not (os.path.exists(logdir)):
+        os.makedirs(logdir)
     dqn.learn(
         env,
         q_func=atari_model,
@@ -71,7 +77,9 @@ def atari_learn(env,
         learning_freq=4,
         frame_history_len=1,
         target_update_freq=10000,
-        grad_norm_clipping=10
+        grad_norm_clipping=10,
+        double_q=False,
+        rew_file=os.path.join(logdir, str(datetime.now().isoformat())) + '.pkl'
     )
     env.close()
 

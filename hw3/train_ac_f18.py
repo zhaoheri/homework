@@ -5,7 +5,7 @@ Adapted for CS294-112 Fall 2018 by Soroush Nasiriany, Sid Reddy, and Greg Kahn
 """
 import numpy as np
 import tensorflow as tf
-import tensorflow_probability as tfp
+# import tensorflow_probability as tfp
 import gym
 import logz
 import os
@@ -37,7 +37,12 @@ def build_mlp(input_placeholder, output_size, scope, n_layers, size, activation=
         Hint: use tf.layers.dense    
     """
     # YOUR HW2 CODE HERE
-    raise NotImplementedError
+    with tf.variable_scope(scope):
+        output_placeholder = input_placeholder
+        for layer in range(n_layers):
+            output_placeholder = tf.layers.dense(inputs=output_placeholder, units=size, activation=activation)
+        output_placeholder = tf.layers.dense(inputs=output_placeholder, units=output_size, activation=output_activation)
+
     return output_placeholder
 
 
@@ -67,6 +72,7 @@ class Agent(object):
         self.size = computation_graph_args['size']
         self.n_layers = computation_graph_args['n_layers']
         self.learning_rate = computation_graph_args['learning_rate']
+        self.critic_learning_rate = computation_graph_args['critic_learning_rate']
         self.num_target_updates = computation_graph_args['num_target_updates']
         self.num_grad_steps_per_target_update = computation_graph_args['num_grad_steps_per_target_update']
 
@@ -95,14 +101,13 @@ class Agent(object):
                 sy_ac_na: placeholder for actions
                 sy_adv_n: placeholder for advantages
         """
-        raise NotImplementedError
         sy_ob_no = tf.placeholder(shape=[None, self.ob_dim], name="ob", dtype=tf.float32)
         if self.discrete:
             sy_ac_na = tf.placeholder(shape=[None], name="ac", dtype=tf.int32)
         else:
             sy_ac_na = tf.placeholder(shape=[None, self.ac_dim], name="ac", dtype=tf.float32)
-            # YOUR HW2 CODE HERE
-        sy_adv_n = None
+        # YOUR HW2 CODE HERE
+        sy_adv_n = tf.placeholder(shape=[None], name="adv", dtype=tf.float32)
         return sy_ob_no, sy_ac_na, sy_adv_n
 
     def policy_forward_pass(self, sy_ob_no):
@@ -130,16 +135,17 @@ class Agent(object):
                 Pass in self.n_layers for the 'n_layers' argument, and
                 pass in self.size for the 'size' argument.
         """
-        raise NotImplementedError
         if self.discrete:
             # YOUR_HW2 CODE_HERE
-            sy_logits_na = None
+            sy_logits_na = build_mlp(input_placeholder=sy_ob_no, output_size=self.ac_dim,
+                                     n_layers=self.n_layers, size=self.size, scope='policy_forward')
             return sy_logits_na
         else:
             # YOUR_HW2 CODE_HERE
-            sy_mean = None
-            sy_logstd = None
-            return (sy_mean, sy_logstd)
+            sy_mean = build_mlp(input_placeholder=sy_ob_no, output_size=self.ac_dim,
+                                n_layers=self.n_layers, size=self.size, scope='policy_forward')
+            sy_logstd = tf.get_variable(name='policy_forward/lgstd', dtype=tf.float32, shape=[self.ac_dim])
+            return sy_mean, sy_logstd
 
     def sample_action(self, policy_parameters):
         """ Constructs a symbolic operation for stochastically sampling from the policy
@@ -165,15 +171,18 @@ class Agent(object):
         
                  This reduces the problem to just sampling z. (Hint: use tf.random_normal!)
         """
-        raise NotImplementedError
         if self.discrete:
             sy_logits_na = policy_parameters
             # YOUR_HW2 CODE_HERE
-            sy_sampled_ac = None
+            sy_sampled_ac = tf.multinomial(logits=sy_logits_na, num_samples=1, name='multinomial_sample')
+            # Flatten samples
+            sy_sampled_ac = tf.reshape(tensor=sy_sampled_ac, shape=[-1])
         else:
             sy_mean, sy_logstd = policy_parameters
             # YOUR_HW2 CODE_HERE
-            sy_sampled_ac = None
+            # NOTED: tf.shape -> (dynamic shape) vs sy_mean.shape -> (static shape)
+            # https://stackoverflow.com/questions/37096225/how-to-understand-static-shape-and-dynamic-shape-in-tensorflow
+            sy_sampled_ac = tf.random_normal(shape=tf.shape(sy_mean), mean=sy_mean, stddev=tf.exp(sy_logstd))
         return sy_sampled_ac
 
     def get_log_prob(self, policy_parameters, sy_ac_na):
@@ -197,15 +206,16 @@ class Agent(object):
                 For the discrete case, use the log probability under a categorical distribution.
                 For the continuous case, use the log probability under a multivariate gaussian.
         """
-        raise NotImplementedError
         if self.discrete:
             sy_logits_na = policy_parameters
             # YOUR_HW2 CODE_HERE
-            sy_logprob_n = None
+            sy_logprob_n = -tf.nn.sparse_softmax_cross_entropy_with_logits(
+                logits=sy_logits_na, labels=sy_ac_na, name='logprob')
         else:
             sy_mean, sy_logstd = policy_parameters
             # YOUR_HW2 CODE_HERE
-            sy_logprob_n = None
+            dist = tf.contrib.distributions.MultivariateNormalDiag(sy_mean, tf.exp(sy_logstd))
+            sy_logprob_n = dist.log_prob(sy_ac_na)
         return sy_logprob_n
 
     def build_computation_graph(self):
@@ -254,7 +264,7 @@ class Agent(object):
             size=self.size))
         self.sy_target_n = tf.placeholder(shape=[None], name="critic_target", dtype=tf.float32)
         self.critic_loss = tf.losses.mean_squared_error(self.sy_target_n, self.critic_prediction)
-        self.critic_update_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.critic_loss)
+        self.critic_update_op = tf.train.AdamOptimizer(self.critic_learning_rate).minimize(self.critic_loss)
 
     def sample_trajectories(self, itr, env):
         # Collect paths until we have enough timesteps
@@ -278,24 +288,23 @@ class Agent(object):
                 env.render()
                 time.sleep(0.1)
             obs.append(ob)
-            raise NotImplementedError
-            ac = None  # YOUR HW2 CODE HERE
+            ac = self.sess.run(self.sy_sampled_ac, feed_dict={self.sy_ob_no: [ob]})  # YOUR HW2 CODE HERE
             ac = ac[0]
             acs.append(ac)
             ob, rew, done, _ = env.step(ac)
             # add the observation after taking a step to next_obs
             # YOUR CODE HERE
-            raise NotImplementedError
+            next_obs.append(ob)
             rewards.append(rew)
             steps += 1
             # If the episode ended, the corresponding terminal value is 1
             # otherwise, it is 0
             # YOUR CODE HERE
             if done or steps > self.max_path_length:
-                raise NotImplementedError
+                terminals.append(1)
                 break
             else:
-                raise NotImplementedError
+                terminals.append(0)
         path = {"observation": np.array(obs, dtype=np.float32),
                 "reward": np.array(rewards, dtype=np.float32),
                 "action": np.array(acs, dtype=np.float32),
@@ -329,12 +338,12 @@ class Agent(object):
         # Note: don't forget to use terminal_n to cut off the V(s') term when computing Q(s, a)
         # otherwise the values will grow without bound.
         # YOUR CODE HERE
-        raise NotImplementedError
-        adv_n = None
+        v_n = self.sess.run(self.critic_prediction, feed_dict={self.sy_ob_no: ob_no})
+        v_next_n = self.sess.run(self.critic_prediction, feed_dict={self.sy_ob_no: next_ob_no})
+        adv_n = re_n + self.gamma * (1 - terminal_n) * v_next_n - v_n
 
         if self.normalize_advantages:
-            raise NotImplementedError
-            adv_n = None  # YOUR_HW2 CODE_HERE
+            adv_n = (adv_n - np.mean(adv_n)) / np.std(adv_n)  # YOUR_HW2 CODE_HERE
         return adv_n
 
     def update_critic(self, ob_no, next_ob_no, re_n, terminal_n):
@@ -364,7 +373,11 @@ class Agent(object):
         # Note: don't forget to use terminal_n to cut off the V(s') term when computing the target
         # otherwise the values will grow without bound.
         # YOUR CODE HERE
-        raise NotImplementedError
+        for _ in range(self.num_target_updates):
+            v_next_n = self.sess.run(self.critic_prediction, feed_dict={self.sy_ob_no: next_ob_no})
+            target_n = re_n + self.gamma * (1 - terminal_n) * v_next_n
+            for _ in range(self.num_grad_steps_per_target_update):
+                self.sess.run(self.critic_update_op, feed_dict={self.sy_target_n: target_n, self.sy_ob_no: ob_no})
 
     def update_actor(self, ob_no, ac_na, adv_n):
         """ 
@@ -392,6 +405,7 @@ def train_AC(
         min_timesteps_per_batch,
         max_path_length,
         learning_rate,
+        critic_learning_rate,
         num_target_updates,
         num_grad_steps_per_target_update,
         animate,
@@ -439,6 +453,7 @@ def train_AC(
         'discrete': discrete,
         'size': size,
         'learning_rate': learning_rate,
+        'critic_learning_rate': critic_learning_rate,
         'num_target_updates': num_target_updates,
         'num_grad_steps_per_target_update': num_grad_steps_per_target_update,
     }
@@ -485,7 +500,9 @@ def train_AC(
         # (2) use the updated critic to compute the advantage by, calling agent.estimate_advantage
         # (3) use the estimated advantage values to update the actor, by calling agent.update_actor
         # YOUR CODE HERE
-        raise NotImplementedError
+        agent.update_critic(ob_no, next_ob_no, re_n, terminal_n)
+        adv_n = agent.estimate_advantage(ob_no, next_ob_no, re_n, terminal_n)
+        agent.update_actor(ob_no, ac_na, adv_n)
 
         # Log diagnostics
         returns = [path["reward"].sum() for path in paths]
@@ -515,6 +532,7 @@ def main():
     parser.add_argument('--batch_size', '-b', type=int, default=1000)
     parser.add_argument('--ep_len', '-ep', type=float, default=-1.)
     parser.add_argument('--learning_rate', '-lr', type=float, default=5e-3)
+    parser.add_argument('--critic_learning_rate', '-clr', type=float, default=5e-3)
     parser.add_argument('--dont_normalize_advantages', '-dna', action='store_true')
     parser.add_argument('--num_target_updates', '-ntu', type=int, default=10)
     parser.add_argument('--num_grad_steps_per_target_update', '-ngsptu', type=int, default=10)
@@ -550,6 +568,7 @@ def main():
                 min_timesteps_per_batch=args.batch_size,
                 max_path_length=max_path_length,
                 learning_rate=args.learning_rate,
+                critic_learning_rate=args.critic_learning_rate,
                 num_target_updates=args.num_target_updates,
                 num_grad_steps_per_target_update=args.num_grad_steps_per_target_update,
                 animate=args.render,
