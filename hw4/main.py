@@ -11,6 +11,7 @@ parser.add_argument('question', type=str, choices=('q1, q2, q3'))
 parser.add_argument('--exp_name', type=str, default=None)
 parser.add_argument('--env', type=str, default='HalfCheetah', choices=('HalfCheetah',))
 parser.add_argument('--render', action='store_true')
+parser.add_argument('--cem', action='store_true')
 parser.add_argument('--mpc_horizon', type=int, default=15)
 parser.add_argument('--num_random_action_selection', type=int, default=4096)
 parser.add_argument('--nn_layers', type=int, default=1)
@@ -34,7 +35,8 @@ mbrl = ModelBasedRL(env=env,
                     render=args.render,
                     mpc_horizon=args.mpc_horizon,
                     num_random_action_selection=args.num_random_action_selection,
-                    nn_layers=args.nn_layers)
+                    nn_layers=args.nn_layers,
+                    cem=args.cem)
 
 run_func = {
     'q1': mbrl.run_q1,

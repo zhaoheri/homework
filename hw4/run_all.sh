@@ -16,8 +16,8 @@
 ### Q3a ###
 ###########
 
-#python3 main.py q3 --exp_name default
-#python3 plot.py --exps HalfCheetah_q3_default --save HalfCheetah_q3_default
+python3 main.py q3 --exp_name default
+python3 plot.py --exps HalfCheetah_q3_default --save HalfCheetah_q3_default
 
 ###########
 ### Q3b ###

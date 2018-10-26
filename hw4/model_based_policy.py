@@ -11,7 +11,8 @@ class ModelBasedPolicy(object):
                  init_dataset,
                  horizon=15,
                  num_random_action_selection=4096,
-                 nn_layers=1):
+                 nn_layers=1,
+                 cem=False):
         self._cost_fn = env.cost_fn
         self._state_dim = env.observation_space.shape[0]
         self._action_dim = env.action_space.shape[0]
@@ -21,6 +22,7 @@ class ModelBasedPolicy(object):
         self._horizon = horizon
         self._num_random_action_selection = num_random_action_selection
         self._nn_layers = nn_layers
+        self._cem = cem
         self._learning_rate = 1e-3
 
         self._sess, self._state_ph, self._action_ph, self._next_state_ph,\
@@ -111,6 +113,60 @@ class ModelBasedPolicy(object):
 
         return loss, optimizer
 
+    def _setup_action_selection_cem(self, state_ph):
+        # Cross Entropy Method
+        print('# Cross Entropy Method')
+        def tf_cov(x):
+            mean_x = tf.reduce_mean(x, axis=0, keepdims=True)
+            mx = tf.matmul(tf.transpose(mean_x), mean_x)
+            vx = tf.matmul(tf.transpose(x), x) / tf.cast(tf.shape(x)[0], tf.float32)
+            cov_xx = vx - mx
+            return cov_xx
+
+        # 1. init distribution with mean=0, cov=diag(1)
+        # 2. sample actions under the distribution
+        # 3. evaluate cost for each sequence
+        # 4. choose first Ne sequences, update mean and cov
+        # 5. repeat 2-4
+        tfd = tf.contrib.distributions
+        init_mean = tf.tile(tf.ones(self._action_dim) * self._init_dataset.action_mean, [self._horizon])
+        init_cov = tf.eye(self._action_dim * self._horizon)
+        mvn = tfd.MultivariateNormalFullCovariance(loc=init_mean, covariance_matrix=init_cov)
+        maxits = 5
+        t = 0
+        Ne = 1000
+        while t < maxits:
+            action_sequences = tf.reshape(mvn.sample([self._num_random_action_selection]),
+                                          [self._num_random_action_selection, self._horizon, self._action_dim])
+            costs = tf.zeros(shape=[self._num_random_action_selection], dtype=tf.float32)
+            states = tf.ones([self._num_random_action_selection, self._state_dim]) * state_ph
+            for i in range(self._horizon):
+                actions = action_sequences[:, i]
+                next_states = self._dynamics_func(states, actions, reuse=True)
+                costs += self._cost_fn(states, actions, next_states)
+                states = next_states
+            values, indices = tf.nn.top_k(-costs, Ne)
+            best_sequences = tf.gather(action_sequences, indices)
+            best_sequences = tf.reshape(best_sequences, [Ne, self._horizon * self._action_dim])
+            new_mean = tf.reduce_mean(best_sequences, axis=0, keepdims=True)
+            new_cov = tf_cov(best_sequences)
+            mvn = tfd.MultivariateNormalFullCovariance(loc=new_mean, covariance_matrix=new_cov)
+            t += 1
+
+        action_sequences = tf.reshape(mvn.sample([self._num_random_action_selection]),
+                                      [self._num_random_action_selection, self._horizon, self._action_dim])
+        costs = tf.zeros(shape=[self._num_random_action_selection], dtype=tf.float32)
+        states = tf.ones([self._num_random_action_selection, self._state_dim]) * state_ph
+        for i in range(self._horizon):
+            actions = action_sequences[:, i]
+            next_states = self._dynamics_func(states, actions, reuse=True)
+            costs += self._cost_fn(states, actions, next_states)
+            states = next_states
+
+        lowest_cost_index = tf.argmin(costs)
+        best_action = action_sequences[lowest_cost_index, 0]
+        return best_action
+
     def _setup_action_selection(self, state_ph):
         """
             Computes the best action from the current state by using randomly sampled action sequences
@@ -171,7 +227,8 @@ class ModelBasedPolicy(object):
         loss, optimizer = self._setup_training(state_ph, next_state_ph, next_state_pred)
         ### PROBLEM 2
         ### YOUR CODE HERE
-        best_action = self._setup_action_selection(state_ph)
+        best_action = self._setup_action_selection_cem(state_ph) if self._cem \
+            else self._setup_action_selection(state_ph)
 
         sess.run(tf.global_variables_initializer())
 
