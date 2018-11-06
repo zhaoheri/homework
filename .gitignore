@@ -90,3 +90,7 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+hw4/report/
+hw3/data/
+hw4/submit.zip
